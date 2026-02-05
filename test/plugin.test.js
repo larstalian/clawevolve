@@ -116,6 +116,7 @@ test("plugin uses official OpenClaw API contracts for service, gateway, command,
     assert.equal(registerHookCalls, 0);
 
     assert.ok(gatewayMethods.has("claw_evolve_status"));
+    assert.ok(gatewayMethods.has("claw_evolve_report"));
     assert.ok(gatewayMethods.has("claw_evolve_force_run"));
     assert.ok(gatewayMethods.has("claw_evolve_export_patch"));
     assert.equal(commands.length, 1);
@@ -140,6 +141,7 @@ test("plugin uses official OpenClaw API contracts for service, gateway, command,
     });
     assert.equal(statusResult.ok, true);
     assert.equal(typeof statusResult.payload.hasChampion, "boolean");
+    assert.equal(typeof statusResult.payload.trigger.ready, "boolean");
 
     let forceResult = null;
     await gatewayMethods.get("claw_evolve_force_run")({

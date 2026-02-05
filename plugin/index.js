@@ -285,14 +285,24 @@ function safeRegisterGateway(api, service) {
   api.registerGatewayMethod(
     "claw_evolve_status",
     wrapGatewayHandler(async () => {
-      const state = service.getState();
+      const report = service.getDiagnostics();
       return {
-        hasChampion: Boolean(state.champion),
-        lastEvolutionAt: state.lastEvolutionAt,
-        trajectoryCount: state.trajectories.length,
-        recentEvents: state.events.slice(-10)
+        hasChampion: report.hasChampion,
+        championId: report.championId,
+        lastEvolutionAt: report.lastEvolutionAt,
+        trajectoryCount: report.trajectoryCount,
+        trigger: report.trigger,
+        recentEvents: report.recentEvents.slice(-10),
+        lastRun: report.lastRun,
+        latestPromotionDiff: report.latestPromotionDiff,
+        recentWindowMetrics: report.recentWindowMetrics
       };
     })
+  );
+
+  api.registerGatewayMethod(
+    "claw_evolve_report",
+    wrapGatewayHandler(async () => service.getDiagnostics())
   );
 
   api.registerGatewayMethod(
@@ -303,9 +313,15 @@ function safeRegisterGateway(api, service) {
         populationSize: Number(params.populationSize || 18)
       });
       return {
+        runId: run.runId || null,
+        source: run.source || "manual",
         championId: run.champion.id,
         aggregateScore: run.championEvaluation.aggregateScore,
-        objectives: run.championEvaluation.objectives
+        objectives: run.championEvaluation.objectives,
+        promoted: Boolean(run.online?.promoted ?? true),
+        gate: run.online?.gate || null,
+        policyDiff: run.online?.policyDiff || null,
+        durationMs: run.durationMs || null
       };
     })
   );
@@ -321,22 +337,91 @@ function safeRegisterGateway(api, service) {
   return true;
 }
 
+function formatTimestamp(value) {
+  if (!value) return "never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "invalid";
+  return date.toISOString();
+}
+
+function formatMetric(value, digits = 3) {
+  if (!Number.isFinite(value)) return "n/a";
+  return Number(value).toFixed(digits);
+}
+
+function formatTriggerSummary(trigger) {
+  if (!trigger) return "unavailable";
+  if (trigger.ready) return "ready now";
+
+  const parts = [];
+  if (trigger.missingForMinTrajectories > 0) {
+    parts.push(`${trigger.missingForMinTrajectories} more trajectories for minimum`);
+  } else if (trigger.missingForInterval > 0) {
+    parts.push(`${trigger.missingForInterval} more trajectories for cadence`);
+  }
+  if (trigger.cooldownRemainingMs > 0) {
+    parts.push(`cooldown ${Math.ceil(trigger.cooldownRemainingMs / 1000)}s`);
+  }
+  if (trigger.evolutionInFlight) parts.push("run in flight");
+
+  return `${trigger.nextReason}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+}
+
+function formatPolicyDiffSummary(diff) {
+  if (!diff) return "none";
+  if (diff.kind === "initial") return "initial champion";
+  const changedFields = Array.isArray(diff.changedFields) ? diff.changedFields : [];
+  if (!changedFields.length) return "no policy fields changed";
+  return changedFields.join(", ");
+}
+
+function formatRecentEvents(events = [], limit = 5) {
+  const rows = events.slice(-limit).map((event) => {
+    const reason = event.reason ? ` reason=${event.reason}` : "";
+    const runId = event.runId ? ` run=${event.runId}` : "";
+    return `- ${formatTimestamp(event.at)} ${event.type}${runId}${reason}`;
+  });
+  return rows.length ? rows : ["- none"];
+}
+
 function safeRegisterCommand(api, service) {
   if (typeof api?.registerCommand !== "function") return false;
 
   api.registerCommand({
     name: "claw-evolve-status",
-    description: "Show ClawEvolve status and champion policy health.",
+    description: "Show ClawEvolve evolution timeline, trigger status, and policy changes.",
     async handler() {
-      const state = service.getState();
-      const lastEventType = state.events.length
-        ? state.events[state.events.length - 1].type
+      const report = service.getDiagnostics();
+      const lastRun = report.lastRun;
+      const championText = report.hasChampion
+        ? `Champion: ${report.championId}`
+        : "Champion: none";
+      const lastRunText = lastRun
+        ? `${lastRun.source} run ${lastRun.runId || "n/a"} promoted=${String(lastRun.promoted)} reason=${lastRun.reason || "n/a"} candidate=${formatMetric(lastRun.candidateAggregate)} incumbent=${formatMetric(lastRun.incumbentAggregate)}`
+        : "No evolution run completed yet.";
+      const topToolChanges = lastRun?.policyDiff?.topToolPreferenceChanges || [];
+      const toolDeltaText = topToolChanges.length
+        ? topToolChanges
+            .slice(0, 3)
+            .map((change) => `${change.toolName}:${change.delta >= 0 ? "+" : ""}${formatMetric(change.delta, 4)}`)
+            .join(", ")
         : "none";
-      const championText = state.champion
-        ? `Champion active: ${state.champion.id}`
-        : "No champion policy promoted yet.";
+      const metrics = report.recentWindowMetrics || {};
+
+      const lines = [
+        championText,
+        `Trajectories: ${report.trajectoryCount}`,
+        `Last evolution: ${formatTimestamp(report.lastEvolutionAt)}`,
+        `Next evolution trigger: ${formatTriggerSummary(report.trigger)}`,
+        `Recent window: n=${metrics.sampleCount || 0} success=${formatMetric(metrics.successRate)} safetyIncidents=${formatMetric(metrics.avgSafetyIncidents)} latencyMs=${formatMetric(metrics.avgLatencyMs, 2)}`,
+        `Last run: ${lastRunText}`,
+        `Policy change summary: ${formatPolicyDiffSummary(lastRun?.policyDiff || report.latestPromotionDiff)}`,
+        `Top tool preference deltas: ${toolDeltaText}`,
+        "Recent events:",
+        ...formatRecentEvents(report.recentEvents, 5)
+      ];
       return {
-        text: `${championText} Trajectories=${state.trajectories.length}. Last event=${lastEventType}.`
+        text: lines.join("\n")
       };
     }
   });

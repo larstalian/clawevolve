@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "node --test",
-    "evolve:demo": "node src/cli.js --input examples/telemetry.json --engine python-sidecar --sidecarBaseUrl http://127.0.0.1:8091 --generations 10 --population 24"
+    "evolve:demo": "node src/cli.js --input examples/telemetry.json --engine python-sidecar --sidecarBaseUrl http://127.0.0.1:8091 --generations 10 --population 24",
+    "evolve:live": "node src/liveDashboard.js"
   },
   "keywords": [
     "openclaw",

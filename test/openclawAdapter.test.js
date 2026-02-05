@@ -214,6 +214,11 @@ test("service performs online evolution automatically", async () => {
     const state = service.getState();
     assert.ok(state.champion);
     assert.ok(state.events.some((event) => event.type === "promotion"));
+    assert.ok(Array.isArray(state.runHistory));
+    assert.ok(state.runHistory.length >= 1);
+    const diagnostics = service.getDiagnostics();
+    assert.equal(typeof diagnostics.trigger.ready, "boolean");
+    assert.ok(Array.isArray(diagnostics.recentRuns));
     assert.equal(sawOuterHoldoutFlag, true);
   });
 });
