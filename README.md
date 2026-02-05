@@ -32,7 +32,8 @@ Telemetry note:
 
 ## Install Plugin
 ```bash
-openclaw plugins install /home/talian/priv/ClawEvolve
+openclaw plugins install .
+openclaw plugins enable claw-evolve
 ```
 
 ## Start GEPA Sidecar
