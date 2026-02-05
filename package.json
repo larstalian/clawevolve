@@ -1,0 +1,27 @@
+{
+  "name": "claw-evolve",
+  "version": "0.1.0",
+  "description": "Official Python GEPA-powered online policy adaptation for OpenClaw agents",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./plugin": "./plugin/index.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "evolve:demo": "node src/cli.js --input examples/telemetry.json --engine python-sidecar --sidecarBaseUrl http://127.0.0.1:8091 --generations 10 --population 24"
+  },
+  "keywords": [
+    "openclaw",
+    "evolutionary-ai",
+    "policy-optimization",
+    "gepa"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./plugin/index.js"
+    ]
+  },
+  "license": "MIT"
+}

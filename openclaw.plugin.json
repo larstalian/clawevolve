@@ -1,0 +1,112 @@
+{
+  "$schema": "https://docs.openclaw.ai/schemas/plugin-manifest.schema.json",
+  "id": "claw-evolve",
+  "name": "ClawEvolve",
+  "version": "0.1.0",
+  "description": "Online evolutionary policy adaptation for OpenClaw agents.",
+  "author": {
+    "name": "ClawEvolve Team"
+  },
+  "main": "./plugin/index.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseModel": {
+        "type": "string",
+        "description": "Base model to optimize policy behavior for."
+      },
+      "basePrompt": {
+        "type": "string",
+        "description": "Initial system prompt seed for policy evolution."
+      },
+      "toolNames": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Allowed tool names participating in policy routing."
+      },
+      "objectiveWeights": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "success": { "type": "number", "minimum": 0 },
+          "satisfaction": { "type": "number", "minimum": 0 },
+          "safety": { "type": "number", "minimum": 0 },
+          "toolReliability": { "type": "number", "minimum": 0 },
+          "efficiency": { "type": "number", "minimum": 0 }
+        }
+      },
+      "safeguards": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxRiskScore": { "type": "number", "minimum": 0, "maximum": 1 },
+          "disallowedTools": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "online": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "minTrajectoriesForEvolution": { "type": "integer", "minimum": 1 },
+          "evolveEveryTrajectories": { "type": "integer", "minimum": 1 },
+          "cooldownMs": { "type": "integer", "minimum": 0 },
+          "windowSize": { "type": "integer", "minimum": 10 }
+        }
+      },
+      "engine": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "type": { "type": "string", "enum": ["python-sidecar"] },
+          "sidecar": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyEnv": { "type": "string" },
+              "timeoutMs": { "type": "integer", "minimum": 1000 },
+              "retries": { "type": "integer", "minimum": 0 },
+              "maxPayloadTrajectories": { "type": "integer", "minimum": 10 }
+            }
+          },
+          "gepa": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "reflectionLm": { "type": "string" },
+              "candidateSelectionStrategy": { "type": "string", "enum": ["pareto", "aggregate"] },
+              "reflectionMinibatchSize": { "type": "integer", "minimum": 1 },
+              "useMerge": { "type": "boolean" },
+              "maxMergeInvocations": { "type": "integer", "minimum": 0 },
+              "maxMetricCalls": { "type": "integer", "minimum": 1 },
+              "seed": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      },
+      "telemetry": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "toolRiskScores": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "safetyIncidentRiskThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+          "errorCountsAsSafetyIncident": { "type": "boolean" }
+        }
+      }
+    },
+    "required": ["baseModel", "basePrompt"]
+  }
+}

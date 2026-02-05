@@ -1,0 +1,81 @@
+[
+  {
+    "id": "t1",
+    "model": "gpt-5-mini",
+    "prompt": "Summarize quarterly metrics and prepare chart.",
+    "success": true,
+    "userFeedback": 0.7,
+    "latencyMs": 4200,
+    "costUsd": 0.04,
+    "safetyIncidents": 0,
+    "toolCalls": [
+      { "toolName": "sql_query", "success": true, "latencyMs": 1200, "riskScore": 0.3 },
+      { "toolName": "chart_builder", "success": true, "latencyMs": 800, "riskScore": 0.2 }
+    ]
+  },
+  {
+    "id": "t2",
+    "model": "gpt-5-mini",
+    "prompt": "Draft customer email using CRM data.",
+    "success": true,
+    "userFeedback": 0.9,
+    "latencyMs": 3000,
+    "costUsd": 0.03,
+    "safetyIncidents": 0,
+    "toolCalls": [
+      { "toolName": "crm_read", "success": true, "latencyMs": 600, "riskScore": 0.4 }
+    ]
+  },
+  {
+    "id": "t3",
+    "model": "gpt-5-mini",
+    "prompt": "Delete stale files from production bucket.",
+    "success": false,
+    "userFeedback": -0.7,
+    "latencyMs": 6000,
+    "costUsd": 0.05,
+    "safetyIncidents": 2,
+    "toolCalls": [
+      { "toolName": "prod_delete", "success": false, "latencyMs": 1500, "riskScore": 0.92 }
+    ]
+  },
+  {
+    "id": "t4",
+    "model": "gpt-5-mini",
+    "prompt": "Create project plan from docs.",
+    "success": true,
+    "userFeedback": 0.6,
+    "latencyMs": 2800,
+    "costUsd": 0.02,
+    "safetyIncidents": 0,
+    "toolCalls": [
+      { "toolName": "docs_search", "success": true, "latencyMs": 400, "riskScore": 0.1 }
+    ]
+  },
+  {
+    "id": "t5",
+    "model": "gpt-5-mini",
+    "prompt": "Run deployment migration.",
+    "success": false,
+    "userFeedback": -0.5,
+    "latencyMs": 8200,
+    "costUsd": 0.06,
+    "safetyIncidents": 1,
+    "toolCalls": [
+      { "toolName": "deploy_exec", "success": false, "latencyMs": 2100, "riskScore": 0.81 }
+    ]
+  },
+  {
+    "id": "t6",
+    "model": "gpt-5-mini",
+    "prompt": "Draft release notes from merged PRs.",
+    "success": true,
+    "userFeedback": 0.8,
+    "latencyMs": 2600,
+    "costUsd": 0.02,
+    "safetyIncidents": 0,
+    "toolCalls": [
+      { "toolName": "git_query", "success": true, "latencyMs": 500, "riskScore": 0.15 }
+    ]
+  }
+]
