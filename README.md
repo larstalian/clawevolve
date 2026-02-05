@@ -1,57 +1,110 @@
 # ClawEvolve
 
-Online policy evolution for OpenClaw agents, powered by GEPA in a Python sidecar.
+ClawEvolve is an online policy-evolution layer for OpenClaw agents.
 
-ClawEvolve learns from session telemetry and continuously updates deployable policy artifacts (prompt behavior, tool routing, safety limits) without fine-tuning model weights.
+It uses official Python GEPA to optimize deployable agent policy artifacts from real session telemetry, then safely promotes or rolls back those policies in production.
 
-## Quick Start
+## What This Is
 
-### Prerequisites
-- Node.js 18+
-- Docker (recommended) or Python 3.11+
-- `OPENAI_API_KEY` for GEPA reflection calls
-- Optional sidecar auth token: `CLAW_EVOLVE_SIDECAR_API_KEY`
+Most agent stacks are static after deployment. ClawEvolve makes them adaptive without touching model weights.
 
-### 1) Install and verify
-```bash
-npm install
-npm test
+What gets evolved:
+- Prompt policy (`systemPrompt`, `responseStyle`)
+- Tool policy (`toolPreferences`, risk thresholds, disallowed tools)
+- Execution policy (`toolRetryBudget`, `deliberationBudget`, `memoryDepth`)
+
+What does not change:
+- Underlying foundation model weights
+- OpenClaw core runtime
+
+## GEPA References
+
+- GEPA paper: https://arxiv.org/abs/2507.19457
+- GEPA docs: https://gepa-ai.github.io/gepa/
+- GEPA repo: https://github.com/gepa-ai/gepa
+
+## How It Works
+
+1. OpenClaw hooks collect trajectory telemetry from real runs.
+2. Trajectories are kept in a rolling in-memory window.
+3. On schedule, the plugin calls the sidecar (`POST /v1/evolve`).
+4. Sidecar runs official `gepa.optimize(...)` and returns a candidate champion.
+5. Plugin applies holdout-based promotion gates.
+6. If live quality drops, rollback restores the previous champion.
+7. State is persisted across restarts via OpenClaw `stateDir`.
+
+## How This Differs From Vanilla GEPA
+
+GEPA-native pieces:
+- Official `gepa.optimize(...)` execution in Python
+- Reflection model + candidate selection strategy (`pareto`/`aggregate`)
+- Reflection minibatch, merge, metric-budget, and seed controls
+
+ClawEvolve-specific pieces:
+- Continuous online triggering from runtime telemetry (not just static offline batch optimization)
+- External production gates before promotion (`aggregate lift`, `safety drop`, `success drop`, `min safety`)
+- Live rollback monitoring after promotion
+- OpenClaw-oriented policy artifact output (config patch), not model retraining
+
+## Safety and Deployment Controls
+
+Before promotion, a candidate must pass holdout gates.
+
+Default gate/rollback thresholds:
+- Promotion: `minAggregateLift=0.003`
+- Promotion: `maxSafetyDrop=0.02`
+- Promotion: `maxSuccessDrop=0.03`
+- Promotion: `minSafety=0.65`
+- Rollback: enabled
+- Rollback trigger: aggregate drop `> 0.05` or safety drop `> 0.05` on live monitor window
+
+Runtime safeguards:
+- `disallowedTools` hard blocklist
+- `maxRiskScore` threshold for tool usage
+- Optional tool-specific risk mapping via telemetry config
+
+## Telemetry Model
+
+Preferred path: OpenClaw passes a full trajectory on `session_end`.
+
+If `session_end` does not include a trajectory, ClawEvolve synthesizes one from official lifecycle hooks:
+- `before_agent_start`
+- `before_tool_call`
+- `after_tool_call`
+- `agent_end`
+
+No synthetic cost or synthetic user-feedback values are injected.
+
+Example trajectory:
+
+```json
+{
+  "id": "traj_123",
+  "success": true,
+  "userFeedback": 0.6,
+  "latencyMs": 1400,
+  "costUsd": 0.02,
+  "safetyIncidents": 0,
+  "toolCalls": [
+    { "toolName": "docs_search", "success": true, "latencyMs": 350, "riskScore": 0.1 }
+  ]
+}
 ```
 
-### 2) Start the GEPA sidecar
-```bash
-export OPENAI_API_KEY=your-openai-key
-export CLAW_EVOLVE_SIDECAR_API_KEY=your-sidecar-token # optional
-docker compose -f docker-compose.sidecar.yml up --build
-```
+## OpenClaw Integration
 
-Health check:
-```bash
-curl http://127.0.0.1:8091/healthz
-```
+Plugin id: `claw-evolve`
 
-### 3) Run a local evolution demo
-```bash
-export CLAW_EVOLVE_SIDECAR_API_KEY=your-sidecar-token # only if auth is enabled
-npm run evolve:demo
-```
+Operational surfaces:
+- Gateway: `claw_evolve_status`
+- Gateway: `claw_evolve_force_run`
+- Gateway: `claw_evolve_export_patch`
+- Command: `claw-evolve-status`
 
-Equivalent direct command:
-```bash
-node src/cli.js \
-  --input examples/telemetry.json \
-  --engine python-sidecar \
-  --sidecarBaseUrl http://127.0.0.1:8091
-```
+Persisted state:
+- `<stateDir>/claw-evolve-state.v1.json`
 
-## Install As OpenClaw Plugin
-
-```bash
-openclaw plugins install .
-openclaw plugins enable claw-evolve
-```
-
-Minimal working plugin config:
+Minimal plugin config:
 
 ```json
 {
@@ -88,17 +141,16 @@ Minimal working plugin config:
 }
 ```
 
-## Runtime Flow
+## Sidecar API
 
-1. OpenClaw hooks collect trajectory telemetry.
-2. Trajectories are stored in a rolling window.
-3. The plugin calls the Python sidecar (`POST /v1/evolve`) on schedule.
-4. Sidecar runs official `gepa.optimize(...)`.
-5. Candidate policy is validated on holdout data before promotion.
-6. Live rollback reverts to the prior champion if metrics regress.
-7. State persists at `<stateDir>/claw-evolve-state.v1.json`.
+- `GET /healthz`
+- `POST /v1/evolve`
 
-## Key Defaults
+If sidecar env `CLAW_EVOLVE_SIDECAR_API_KEY` is set, callers must send:
+
+`Authorization: Bearer <token>`
+
+## Defaults (Code-Level)
 
 | Area | Setting | Default |
 | --- | --- | --- |
@@ -110,83 +162,68 @@ Minimal working plugin config:
 | Online | `minHoldout` | `3` |
 | Online | `generations` | `6` |
 | Online | `populationSize` | `18` |
-| Promotion gate | `minAggregateLift` | `0.003` |
-| Promotion gate | `maxSafetyDrop` | `0.02` |
-| Promotion gate | `maxSuccessDrop` | `0.03` |
-| Promotion gate | `minSafety` | `0.65` |
-| Rollback | `enabled` | `true` |
-| Rollback | `monitorWindow` | `60` |
-| Rollback | `minSamples` | `20` |
-| Rollback | `maxAggregateDrop` | `0.05` |
-| Rollback | `maxSafetyDrop` | `0.05` |
 | Sidecar | `timeoutMs` | `45000` |
 | Sidecar | `retries` | `1` |
 | Sidecar | `maxPayloadTrajectories` | `800` |
 
-## Telemetry Contract
+## Project Layout
 
-Preferred input is a full trajectory at `session_end`:
+- `plugin/index.js`: OpenClaw plugin registration, hooks, gateway methods, command, persistence
+- `src/openclawAdapter.js`: online orchestration, holdout gating, rollback
+- `src/evolutionEngines.js`: JS-to-sidecar transport, retries, payload shaping
+- `src/cli.js`: local telemetry replay demo
+- `sidecar/app.py`: FastAPI sidecar running official GEPA
+- `openclaw.plugin.json`: plugin manifest and config schema
 
-```json
-{
-  "id": "traj_123",
-  "success": true,
-  "userFeedback": 0.6,
-  "latencyMs": 1400,
-  "costUsd": 0.02,
-  "safetyIncidents": 0,
-  "toolCalls": [
-    { "toolName": "docs_search", "success": true, "latencyMs": 350, "riskScore": 0.1 }
-  ]
-}
-```
+## Installation and Local Run
 
-If `session_end` does not include a trajectory, ClawEvolve synthesizes one from hook payloads (`before_agent_start`, `before_tool_call`, `after_tool_call`, `agent_end`) using observed values.
+### Prerequisites
+- Node.js 18+
+- Docker (recommended) or Python 3.11+
+- `OPENAI_API_KEY`
+- Optional `CLAW_EVOLVE_SIDECAR_API_KEY`
 
-## Sidecar API
-
-- `GET /healthz`
-- `POST /v1/evolve`
-
-If sidecar env `CLAW_EVOLVE_SIDECAR_API_KEY` is set, requests must send:
-
-`Authorization: Bearer <token>`
-
-## Operational Interfaces
-
-- Gateway methods:
-  `claw_evolve_status`, `claw_evolve_force_run`, `claw_evolve_export_patch`
-- Command:
-  `claw-evolve-status`
-
-## GEPA Alignment
-
-Implemented directly with GEPA:
-- Official Python `gepa.optimize(...)`
-- Candidate selection strategy (`pareto` or `aggregate`)
-- Reflection minibatching, merge controls, metric budget, and seed controls
-
-ClawEvolve adds:
-- Continuous online triggering from live telemetry
-- External promotion gates + live rollback safety controls
-- OpenClaw policy patch output instead of model training
-
-References:
-- GEPA paper: https://arxiv.org/abs/2507.19457
-- GEPA docs: https://gepa-ai.github.io/gepa/
-
-## Development
-
-Run tests:
+### Install dependencies and run tests
 ```bash
+npm install
 npm test
 ```
 
-## Project Structure
+### Start sidecar (Docker)
+```bash
+export OPENAI_API_KEY=your-openai-key
+export CLAW_EVOLVE_SIDECAR_API_KEY=your-sidecar-token # optional
+docker compose -f docker-compose.sidecar.yml up --build
+```
 
-- `plugin/index.js`: OpenClaw integration layer (hooks, gateway methods, command, persistence)
-- `src/openclawAdapter.js`: evolution orchestration, promotion gate, rollback
-- `src/evolutionEngines.js`: JS -> sidecar transport with retries/timeouts
-- `src/cli.js`: local telemetry replay and one-shot evolution
-- `sidecar/app.py`: GEPA adapter and FastAPI server
-- `openclaw.plugin.json`: plugin manifest and config schema
+### Start sidecar (local Python)
+```bash
+cd sidecar
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export OPENAI_API_KEY=your-openai-key
+export CLAW_EVOLVE_SIDECAR_API_KEY=your-sidecar-token # optional
+uvicorn app:app --host 0.0.0.0 --port 8091
+```
+
+### Run the telemetry demo
+```bash
+export CLAW_EVOLVE_SIDECAR_API_KEY=your-sidecar-token # only if auth is enabled
+npm run evolve:demo
+```
+
+Direct CLI:
+```bash
+node src/cli.js \
+  --input examples/telemetry.json \
+  --engine python-sidecar \
+  --sidecarBaseUrl http://127.0.0.1:8091
+```
+
+### Install plugin in OpenClaw
+```bash
+openclaw plugins install .
+openclaw plugins enable claw-evolve
+```
+
