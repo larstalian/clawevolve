@@ -110,8 +110,7 @@ const configSchema = {
         errorCountsAsSafetyIncident: { type: "boolean" }
       }
     }
-  },
-  required: ["baseModel", "basePrompt"]
+  }
 };
 
 function log(api, level, message, meta = {}) {

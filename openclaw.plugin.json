@@ -106,7 +106,6 @@
           "errorCountsAsSafetyIncident": { "type": "boolean" }
         }
       }
-    },
-    "required": ["baseModel", "basePrompt"]
+    }
   }
 }
