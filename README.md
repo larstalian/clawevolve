@@ -4,26 +4,23 @@ ClawEvolve is an online policy-evolution layer for OpenClaw agents.
 
 It uses official Python GEPA to optimize deployable agent policy artifacts from real session telemetry, then safely promotes or rolls back those policies in production.
 
-## What This Is
-
 Most agent stacks are static after deployment. ClawEvolve makes them adaptive without touching model weights.
 
-What gets evolved:
+GEPA references:
+- Paper: https://arxiv.org/abs/2507.19457
+- Docs: https://gepa-ai.github.io/gepa/
+- Repo: https://github.com/gepa-ai/gepa
+
+ClawEvolve evolves:
 - Prompt policy (`systemPrompt`, `responseStyle`)
 - Tool policy (`toolPreferences`, risk thresholds, disallowed tools)
 - Execution policy (`toolRetryBudget`, `deliberationBudget`, `memoryDepth`)
 
-What does not change:
+ClawEvolve does not change:
 - Underlying foundation model weights
 - OpenClaw core runtime
 
-## GEPA References
-
-- GEPA paper: https://arxiv.org/abs/2507.19457
-- GEPA docs: https://gepa-ai.github.io/gepa/
-- GEPA repo: https://github.com/gepa-ai/gepa
-
-## How It Works
+## Architecture and Runtime Flow
 
 1. OpenClaw hooks collect trajectory telemetry from real runs.
 2. Trajectories are kept in a rolling in-memory window.
@@ -33,7 +30,7 @@ What does not change:
 6. If live quality drops, rollback restores the previous champion.
 7. State is persisted across restarts via OpenClaw `stateDir`.
 
-## How This Differs From Vanilla GEPA
+## GEPA Mapping and Extensions
 
 GEPA-native pieces:
 - Official `gepa.optimize(...)` execution in Python
@@ -46,7 +43,7 @@ ClawEvolve-specific pieces:
 - Live rollback monitoring after promotion
 - OpenClaw-oriented policy artifact output (config patch), not model retraining
 
-## Safety and Deployment Controls
+## Safety and Promotion Controls
 
 Before promotion, a candidate must pass holdout gates.
 
@@ -63,7 +60,7 @@ Runtime safeguards:
 - `maxRiskScore` threshold for tool usage
 - Optional tool-specific risk mapping via telemetry config
 
-## Telemetry Model
+## Telemetry Contract
 
 Preferred path: OpenClaw passes a full trajectory on `session_end`.
 
@@ -97,6 +94,7 @@ Plugin id: `claw-evolve`
 
 Operational surfaces:
 - Gateway: `claw_evolve_status`
+- Gateway: `claw_evolve_report`
 - Gateway: `claw_evolve_force_run`
 - Gateway: `claw_evolve_export_patch`
 - Command: `claw-evolve-status`
@@ -150,7 +148,7 @@ If sidecar env `CLAW_EVOLVE_SIDECAR_API_KEY` is set, callers must send:
 
 `Authorization: Bearer <token>`
 
-## Defaults (Code-Level)
+## Default Configuration
 
 | Area | Setting | Default |
 | --- | --- | --- |
@@ -166,7 +164,7 @@ If sidecar env `CLAW_EVOLVE_SIDECAR_API_KEY` is set, callers must send:
 | Sidecar | `retries` | `1` |
 | Sidecar | `maxPayloadTrajectories` | `800` |
 
-## Project Layout
+## Repository Structure
 
 - `plugin/index.js`: OpenClaw plugin registration, hooks, gateway methods, command, persistence
 - `src/openclawAdapter.js`: online orchestration, holdout gating, rollback
@@ -175,7 +173,7 @@ If sidecar env `CLAW_EVOLVE_SIDECAR_API_KEY` is set, callers must send:
 - `sidecar/app.py`: FastAPI sidecar running official GEPA
 - `openclaw.plugin.json`: plugin manifest and config schema
 
-## Installation and Local Run
+## Setup and Local Development
 
 ### Prerequisites
 - Node.js 18+
@@ -226,4 +224,3 @@ node src/cli.js \
 openclaw plugins install .
 openclaw plugins enable claw-evolve
 ```
-
