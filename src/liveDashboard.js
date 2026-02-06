@@ -212,6 +212,29 @@ function formatToolDelta(change) {
   return `${change.toolName}:${sign}${fmtNumber(delta, 4)} (${fmtNumber(change.from, 4)}->${fmtNumber(change.to, 4)})`;
 }
 
+function summarizePromptLines(prompt, maxLines = 5, maxChars = 160) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return { lines: [], truncated: false };
+  }
+  const normalized = prompt
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lines = normalized.slice(0, maxLines).map((line) =>
+    line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line
+  );
+  return {
+    lines,
+    truncated: normalized.length > maxLines
+  };
+}
+
+function formatSignedNumber(value, digits = 0) {
+  if (!Number.isFinite(value)) return "n/a";
+  const sign = value >= 0 ? "+" : "";
+  return `${sign}${Number(value).toFixed(digits)}`;
+}
+
 function toLinesReport(report, fetchedAt, args, sourceInfo) {
   const lines = [];
   const trigger = report.trigger || {};
@@ -240,6 +263,34 @@ function toLinesReport(report, fetchedAt, args, sourceInfo) {
   lines.push(`- championId: ${report.championId || "none"}`);
   lines.push(`- previousChampionId: ${report.previousChampionId || "none"}`);
   lines.push(`- lastEvolutionAt: ${fmtDate(report.lastEvolutionAt)} (${fmtAgo(report.lastEvolutionAt)})`);
+  lines.push("");
+
+  lines.push("Prompt Evolution");
+  const currentPrompt = report.currentPatch?.agent?.systemPrompt;
+  const currentPromptSummary = summarizePromptLines(currentPrompt, 5, 160);
+  if (!currentPromptSummary.lines.length) {
+    lines.push("- currentPrompt: unavailable");
+  } else {
+    lines.push("- currentPrompt:");
+    for (const promptLine of currentPromptSummary.lines) {
+      lines.push(`  • ${promptLine}`);
+    }
+    if (currentPromptSummary.truncated) {
+      lines.push("  • …");
+    }
+  }
+  const promptDiff = lastRun?.policyDiff?.systemPrompt || report.latestPromotionDiff?.systemPrompt || null;
+  if (!promptDiff) {
+    lines.push("- lastPromptDiff: none");
+  } else {
+    lines.push(
+      `- lastPromptDiff: chars ${promptDiff.previousChars ?? "n/a"} -> ${promptDiff.nextChars ?? "n/a"} (${formatSignedNumber(promptDiff.deltaChars, 0)})`
+    );
+    const added = Array.isArray(promptDiff.addedLines) ? promptDiff.addedLines : [];
+    const removed = Array.isArray(promptDiff.removedLines) ? promptDiff.removedLines : [];
+    lines.push(`- addedLines: ${added.length ? added.slice(0, 4).join(" | ") : "none"}`);
+    lines.push(`- removedLines: ${removed.length ? removed.slice(0, 4).join(" | ") : "none"}`);
+  }
   lines.push("");
 
   lines.push("Recent Window (last 50 trajectories)");
@@ -301,6 +352,7 @@ function requestGatewayMethod(target, method, params = {}, timeoutMs = 12000) {
     const ws = new WebSocket(target.url);
     const connectRequestId = randomUUID();
     let methodRequestId = null;
+    let connectAcked = false;
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -391,10 +443,12 @@ function requestGatewayMethod(target, method, params = {}, timeoutMs = 12000) {
 
       if (frame?.type !== "res") return;
       if (frame.id === connectRequestId) {
+        if (connectAcked) return;
         if (!frame.ok) {
           fail(new Error(frame?.error?.message || "gateway connect failed"));
           return;
         }
+        connectAcked = true;
         methodRequestId = randomUUID();
         ws.send(
           JSON.stringify({
@@ -421,6 +475,7 @@ async function fetchReport(target, timeoutMs) {
 
 async function maybeForceRun(target, args) {
   if (!args.forceRun) return null;
+  const forceRunTimeoutMs = Math.max(120000, args.timeoutMs);
   return requestGatewayMethod(
     target,
     "claw_evolve_force_run",
@@ -428,7 +483,7 @@ async function maybeForceRun(target, args) {
       generations: args.generations,
       populationSize: args.populationSize
     },
-    Math.max(20000, args.timeoutMs)
+    forceRunTimeoutMs
   );
 }
 
@@ -479,7 +534,19 @@ async function main() {
           )
         );
       } else {
-        console.log(JSON.stringify({ ok: true, at: fetchedAt, report }, null, 2));
+        console.log(
+          JSON.stringify(
+            {
+              ok: true,
+              at: fetchedAt,
+              ...(forceRunWarning ? { forceRunWarning } : {}),
+              ...(forced ? { forced } : {}),
+              report
+            },
+            null,
+            2
+          )
+        );
       }
       if (args.once) break;
       await sleep(args.intervalMs);

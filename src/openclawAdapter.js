@@ -396,6 +396,7 @@ export function createOpenClawEvolutionService({
     lastEvolutionAt: 0,
     lastEvolutionTrajectoryCount: 0,
     evolutionInFlight: null,
+    manualEvolutionInFlight: null,
     previousChampion: null,
     baselineEvaluation: null,
     events: [],
@@ -678,6 +679,7 @@ export function createOpenClawEvolutionService({
       : [];
     state.mode = typeof snapshot.mode === "string" ? snapshot.mode : state.mode;
     state.evolutionInFlight = null;
+    state.manualEvolutionInFlight = null;
     return true;
   }
 
@@ -726,6 +728,14 @@ export function createOpenClawEvolutionService({
     restoreState,
 
     async evolve({ generations = 8, populationSize = 20 } = {}) {
+      if (state.manualEvolutionInFlight) {
+        return state.manualEvolutionInFlight;
+      }
+      if (state.evolutionInFlight) {
+        await state.evolutionInFlight;
+      }
+
+      const manualRunPromise = (async () => {
       const runId = id("manual");
       const startedAt = Date.now();
       recordEvent({
@@ -828,6 +838,20 @@ export function createOpenClawEvolutionService({
       state.lastEvolutionAt = completedAt;
       state.lastEvolutionTrajectoryCount = state.trajectories.length;
       return state.lastRun;
+      })();
+
+      state.manualEvolutionInFlight = manualRunPromise;
+      state.evolutionInFlight = manualRunPromise;
+      try {
+        return await manualRunPromise;
+      } finally {
+        if (state.manualEvolutionInFlight === manualRunPromise) {
+          state.manualEvolutionInFlight = null;
+        }
+        if (state.evolutionInFlight === manualRunPromise) {
+          state.evolutionInFlight = null;
+        }
+      }
     },
 
     async waitForIdle() {

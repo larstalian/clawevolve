@@ -293,6 +293,67 @@ test("service can evolve via python-sidecar engine", async () => {
   }
 });
 
+test("manual evolve is single-flight under concurrent calls", async () => {
+  let fetchCalls = 0;
+  await withMockSidecar(async (_url, init = {}) => {
+    fetchCalls += 1;
+    const body = JSON.parse(init.body);
+    const seed = body.seedGenome;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        champion: {
+          ...seed,
+          id: "py_single_flight",
+          mutationTrace: [...(seed.mutationTrace || []), "python-sidecar"]
+        },
+        championEvaluation: {
+          objectives: {
+            successRate: 0.8,
+            satisfaction: 0.7,
+            safety: 0.9,
+            toolReliability: 0.8,
+            efficiency: 0.8
+          },
+          aggregateScore: 0.8
+        },
+        history: []
+      })
+    };
+  }, async () => {
+    const service = createOpenClawEvolutionService({
+      baseModel: "gpt-5-mini",
+      basePrompt: "Be safe and useful.",
+      toolNames: ["docs_search"],
+      safeguards: { maxRiskScore: 0.55 },
+      online: { enabled: false }
+    });
+
+    service.ingestTrajectory({
+      id: "sf_1",
+      success: true,
+      userFeedback: 0.7,
+      latencyMs: 1000,
+      costUsd: 0.01,
+      safetyIncidents: 0,
+      toolCalls: [{ toolName: "docs_search", success: true, riskScore: 0.1 }]
+    });
+
+    const [runA, runB] = await Promise.all([
+      service.evolve({ generations: 2, populationSize: 6 }),
+      service.evolve({ generations: 2, populationSize: 6 })
+    ]);
+    assert.equal(fetchCalls, 1);
+    assert.equal(runA.runId, runB.runId);
+    const starts = service
+      .getState()
+      .events.filter((event) => event.type === "evolution_start" && event.source === "manual");
+    assert.equal(starts.length, 1);
+  });
+});
+
 test("service can export and restore state snapshots", async () => {
   const serviceA = createOpenClawEvolutionService({
     baseModel: "gpt-5-mini",

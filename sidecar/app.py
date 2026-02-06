@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import statistics
@@ -110,6 +111,10 @@ class OpenClawTelemetryAdapter:
     ) -> None:
         self.seed_policy = seed_policy
         self.objective_weights = objective_weights
+        # Optional GEPA adapter hooks used by reflective mutation.
+        # We intentionally leave them unset (None) to use GEPA defaults.
+        self.propose_new_texts = None
+        self.select_predictors_to_update = None
 
     def _parse_policy(self, candidate: Dict[str, str]) -> tuple[Dict[str, Any], Optional[str]]:
         payload = candidate.get("policy_json", "")
@@ -247,13 +252,7 @@ class OpenClawTelemetryAdapter:
         outputs: List[Dict[str, Any]] = []
         scores: List[float] = []
         trajectories: List[Dict[str, Any]] = []
-        objective_scores: Dict[str, List[float]] = {
-            "successRate": [],
-            "satisfaction": [],
-            "safety": [],
-            "toolReliability": [],
-            "efficiency": [],
-        }
+        objective_scores: List[Dict[str, float]] = []
 
         for example in batch:
             score, objectives, output, feedback = self._evaluate_example(example, policy)
@@ -262,8 +261,7 @@ class OpenClawTelemetryAdapter:
                 feedback = f"{feedback} Parse error fallback: {parse_error}"
             outputs.append(output)
             scores.append(score)
-            for key, value in objectives.items():
-                objective_scores[key].append(value)
+            objective_scores.append(objectives)
             if capture_traces:
                 trajectories.append(
                     {
@@ -328,6 +326,185 @@ def extract_history(result: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _set_first_supported(
+    kwargs: Dict[str, Any],
+    supported: set[str],
+    names: List[str],
+    value: Any,
+) -> Optional[str]:
+    for name in names:
+        if name in supported:
+            kwargs[name] = value
+            return name
+    return None
+
+
+def build_gepa_optimize_kwargs(
+    request: EvolveRequest,
+    *,
+    seed_candidate: Dict[str, str],
+    trainset: List[Dict[str, Any]],
+    valset: List[Dict[str, Any]],
+    adapter: OpenClawTelemetryAdapter,
+    reflection_lm: Any,
+    strategy: str,
+    reflection_minibatch_size: int,
+    use_merge: bool,
+    max_metric_calls: int,
+    max_merge_invocations: int,
+    seed: int,
+) -> tuple[Dict[str, Any], Dict[str, Optional[str]]]:
+    supported = set(inspect.signature(gepa.optimize).parameters.keys())
+
+    kwargs: Dict[str, Any] = {
+        "seed_candidate": seed_candidate,
+        "trainset": trainset,
+        "valset": valset,
+        "adapter": adapter,
+        "reflection_lm": reflection_lm,
+    }
+
+    mapping: Dict[str, Optional[str]] = {}
+    mapping["generations"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "n_refine",
+            "num_refine",
+            "n_generations",
+            "num_generations",
+            "n_iterations",
+            "num_iterations",
+            "iterations",
+            "n_steps",
+            "steps",
+        ],
+        int(request.generations),
+    )
+    mapping["populationSize"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "population_size",
+            "pop_size",
+            "n_population",
+            "population",
+            "num_candidates",
+        ],
+        int(request.populationSize),
+    )
+    mapping["candidateSelectionStrategy"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "candidate_selection_strategy",
+        ],
+        strategy,
+    )
+    mapping["reflectionMinibatchSize"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "reflection_minibatch_size",
+            "minibatch_size",
+        ],
+        int(reflection_minibatch_size),
+    )
+    mapping["useMerge"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "use_merge",
+        ],
+        bool(use_merge),
+    )
+    mapping["maxMergeInvocations"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "max_merge_invocations",
+        ],
+        int(max_merge_invocations),
+    )
+    mapping["maxMetricCalls"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "max_metric_calls",
+            "max_metrics_calls",
+        ],
+        int(max_metric_calls),
+    )
+    mapping["seed"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "seed",
+            "random_seed",
+        ],
+        int(seed),
+    )
+    mapping["raiseOnException"] = _set_first_supported(
+        kwargs,
+        supported,
+        [
+            "raise_on_exception",
+        ],
+        False,
+    )
+
+    return kwargs, mapping
+
+
+def coerce_lm_output_to_text(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        if not raw:
+            return ""
+        first = raw[0]
+        return coerce_lm_output_to_text(first)
+    if isinstance(raw, dict):
+        for key in ("text", "content", "output", "completion"):
+            value = raw.get(key)
+            if isinstance(value, str):
+                return value
+            if value is not None:
+                nested = coerce_lm_output_to_text(value)
+                if nested:
+                    return nested
+        return str(raw)
+
+    text_attr = getattr(raw, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+
+    content_attr = getattr(raw, "content", None)
+    if content_attr is not None:
+        nested = coerce_lm_output_to_text(content_attr)
+        if nested:
+            return nested
+
+    return str(raw)
+
+
+def build_reflection_lm(model: str) -> Any:
+    lm_kwargs: Dict[str, Any] = {}
+    normalized = str(model).lower()
+    # LiteLLM rejects temperature=0 for GPT-5 family.
+    if "gpt-5" in normalized:
+        lm_kwargs["temperature"] = 1
+    base_lm = dspy.LM(model, **lm_kwargs)
+
+    def call(prompt: str) -> str:
+        raw = base_lm(prompt)
+        return coerce_lm_output_to_text(raw)
+
+    return call
+
+
 def require_auth(authorization: Optional[str]) -> None:
     expected_token = os.getenv("CLAW_EVOLVE_SIDECAR_API_KEY")
     if not expected_token:
@@ -377,7 +554,7 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
     gepa_cfg = request.gepa or {}
     reflection_model = gepa_cfg.get("reflectionLm", "openai/gpt-5-mini")
     try:
-        reflection_lm = dspy.LM(reflection_model)
+        reflection_lm = build_reflection_lm(reflection_model)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to initialize reflection LM: {exc}") from exc
 
@@ -400,32 +577,59 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
     if max_metric_calls is None:
         max_metric_calls = max(40, request.generations * request.populationSize * 2)
 
+    max_merge_invocations = int(gepa_cfg.get("maxMergeInvocations", 5))
+    seed_value = int(gepa_cfg.get("seed", 0))
+    optimize_kwargs, optimize_param_mapping = build_gepa_optimize_kwargs(
+        request,
+        seed_candidate=seed_candidate,
+        trainset=trainset,
+        valset=valset,
+        adapter=adapter,
+        reflection_lm=reflection_lm,
+        strategy=strategy,
+        reflection_minibatch_size=reflection_minibatch_size,
+        use_merge=use_merge,
+        max_metric_calls=int(max_metric_calls),
+        max_merge_invocations=max_merge_invocations,
+        seed=seed_value,
+    )
+
     try:
-        result = gepa.optimize(
-            seed_candidate=seed_candidate,
-            trainset=trainset,
-            valset=valset,
-            adapter=adapter,
-            reflection_lm=reflection_lm,
-            n_refine=request.generations,
-            candidate_selection_strategy=strategy,
-            reflection_minibatch_size=reflection_minibatch_size,
-            use_merge=use_merge,
-            max_merge_invocations=int(gepa_cfg.get("maxMergeInvocations", 5)),
-            max_metric_calls=int(max_metric_calls),
-            seed=int(gepa_cfg.get("seed", 0)),
-            raise_on_exception=False,
-        )
+        result = gepa.optimize(**optimize_kwargs)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"GEPA optimization failed: {exc}") from exc
+        optimize_signature = str(inspect.signature(gepa.optimize))
+        provided_kwargs = sorted(list(optimize_kwargs.keys()))
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "GEPA optimization failed: "
+                f"{exc}; optimize_signature={optimize_signature}; "
+                f"provided_kwargs={provided_kwargs}"
+            ),
+        ) from exc
 
     best_candidate = getattr(result, "best_candidate", seed_candidate)
     if not isinstance(best_candidate, dict):
         best_candidate = seed_candidate
 
     eval_batch = adapter.evaluate(valset, best_candidate, capture_traces=False)
+    objective_rows = eval_batch.objective_scores or []
+    objective_keys = [
+        "successRate",
+        "satisfaction",
+        "safety",
+        "toolReliability",
+        "efficiency",
+    ]
     objective_means = {
-        key: mean([float(v) for v in values]) for key, values in (eval_batch.objective_scores or {}).items()
+        key: mean(
+            [
+                float(row.get(key, 0.0))
+                for row in objective_rows
+                if isinstance(row, dict)
+            ]
+        )
+        for key in objective_keys
     }
     champion_eval = {
         "objectives": objective_means,
@@ -449,6 +653,7 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
             "candidateSelectionStrategy": strategy,
             "reflectionMinibatchSize": reflection_minibatch_size,
             "useMerge": use_merge,
+            "optimizeParamMapping": optimize_param_mapping,
         },
     }
 
