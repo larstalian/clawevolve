@@ -360,8 +360,8 @@ export function createOpenClawEvolutionService({
   const algorithmConfig = {
     mode: "gepa-python-sidecar",
     candidateSelectionStrategy: engine?.gepa?.candidateSelectionStrategy ?? "pareto",
-    reflectionMinibatchSize: engine?.gepa?.reflectionMinibatchSize ?? 3,
-    useMerge: engine?.gepa?.useMerge ?? true
+    reflectionMinibatchSize: engine?.gepa?.reflectionMinibatchSize ?? 2,
+    useMerge: engine?.gepa?.useMerge ?? false
   };
 
   const onlineCfg = {
@@ -372,8 +372,8 @@ export function createOpenClawEvolutionService({
     windowSize: online?.windowSize ?? 400,
     holdoutRatio: online?.holdoutRatio ?? 0.2,
     minHoldout: online?.minHoldout ?? 3,
-    generations: online?.generations ?? 6,
-    populationSize: online?.populationSize ?? 18,
+    generations: online?.generations ?? 3,
+    populationSize: online?.populationSize ?? 8,
     promotion: {
       minAggregateLift: online?.promotion?.minAggregateLift ?? 0.003,
       maxSafetyDrop: online?.promotion?.maxSafetyDrop ?? 0.02,
@@ -397,6 +397,7 @@ export function createOpenClawEvolutionService({
     lastEvolutionTrajectoryCount: 0,
     evolutionInFlight: null,
     manualEvolutionInFlight: null,
+    activeManualRun: null,
     previousChampion: null,
     baselineEvaluation: null,
     events: [],
@@ -680,6 +681,7 @@ export function createOpenClawEvolutionService({
     state.mode = typeof snapshot.mode === "string" ? snapshot.mode : state.mode;
     state.evolutionInFlight = null;
     state.manualEvolutionInFlight = null;
+    state.activeManualRun = null;
     return true;
   }
 
@@ -715,8 +717,10 @@ export function createOpenClawEvolutionService({
         trigger,
         recentWindowMetrics: summarizeTrajectoryWindow(state.trajectories, 50),
         lastRun: structuredClone(lastRunSummary),
+        lastRunDetails: state.lastRun ? structuredClone(state.lastRun) : null,
         recentRuns: structuredClone(state.runHistory.slice(-10)),
         recentEvents: structuredClone(state.events.slice(-25)),
+        activeManualRun: state.activeManualRun ? structuredClone(state.activeManualRun) : null,
         latestPromotionDiff: latestPromotion?.policyDiff
           ? structuredClone(latestPromotion.policyDiff)
           : null,
@@ -727,7 +731,7 @@ export function createOpenClawEvolutionService({
     exportState,
     restoreState,
 
-    async evolve({ generations = 8, populationSize = 20 } = {}) {
+    async evolve({ generations = 3, populationSize = 8 } = {}) {
       if (state.manualEvolutionInFlight) {
         return state.manualEvolutionInFlight;
       }
@@ -735,109 +739,116 @@ export function createOpenClawEvolutionService({
         await state.evolutionInFlight;
       }
 
-      const manualRunPromise = (async () => {
       const runId = id("manual");
       const startedAt = Date.now();
-      recordEvent({
-        type: "evolution_start",
-        source: "manual",
+      state.activeManualRun = {
         runId,
-        trainSize: state.trajectories.length,
-        holdoutSize: 0,
-        generations,
-        populationSize
-      });
-
-      const incumbentGenome = state.champion;
-      const seedGenome =
-        incumbentGenome ??
-        createSeedGenome({
-          baseModel,
-          systemPrompt: basePrompt,
-          toolNames,
-          safeguards
-        });
-      const run = await runEvolution({
-        seedGenome,
-        trajectories: state.trajectories,
-        generations,
-        populationSize
-      });
-      const evaluationSet = state.trajectories;
-      const candidateEval = evaluateGenome(run.champion, evaluationSet, objectiveWeights);
-      const incumbentEval = incumbentGenome
-        ? evaluateGenome(incumbentGenome, evaluationSet, objectiveWeights)
-        : null;
-      const policyDiff = summarizePolicyDiff(incumbentGenome, run.champion);
-      if (incumbentGenome) state.previousChampion = incumbentGenome;
-      state.champion = run.champion;
-      state.baselineEvaluation = candidateEval;
-
-      const completedAt = Date.now();
-      const runSummary = {
-        runId,
-        source: "manual",
         startedAt,
-        completedAt,
-        durationMs: completedAt - startedAt,
-        trainSize: state.trajectories.length,
-        holdoutSize: 0,
-        promoted: true,
-        reason: "manual_force_run",
-        championId: run.champion.id,
-        candidateAggregate: roundMetric(candidateEval.aggregateScore),
-        incumbentAggregate: roundMetric(incumbentEval?.aggregateScore),
-        gate: {
-          promote: true,
-          reason: "manual_force_run"
-        },
-        policyDiff
+        generations,
+        populationSize
       };
-      recordRun(runSummary);
-      recordEvent({
-        type: "promotion",
-        source: "manual",
-        runId,
-        reason: "manual_force_run",
-        policyId: run.champion.id,
-        candidateEval,
-        incumbentEval,
-        policyDiff
-      });
-      recordEvent({
-        type: "evolution_complete",
-        source: "manual",
-        runId,
-        promoted: true,
-        reason: "manual_force_run",
-        policyId: run.champion.id,
-        durationMs: runSummary.durationMs
-      });
 
-      state.lastRun = {
-        ...run,
-        runId,
-        source: "manual",
-        startedAt,
-        completedAt,
-        durationMs: runSummary.durationMs,
-        online: {
-          trainSetSize: state.trajectories.length,
-          holdoutSetSize: 0,
-          validationSetSize: state.trajectories.length,
-          candidateEval,
-          incumbentEval,
+      const manualRunPromise = (async () => {
+        recordEvent({
+          type: "evolution_start",
+          source: "manual",
+          runId,
+          trainSize: state.trajectories.length,
+          holdoutSize: 0,
+          generations,
+          populationSize
+        });
+
+        const incumbentGenome = state.champion;
+        const seedGenome =
+          incumbentGenome ??
+          createSeedGenome({
+            baseModel,
+            systemPrompt: basePrompt,
+            toolNames,
+            safeguards
+          });
+        const run = await runEvolution({
+          seedGenome,
+          trajectories: state.trajectories,
+          generations,
+          populationSize
+        });
+        const evaluationSet = state.trajectories;
+        const candidateEval = evaluateGenome(run.champion, evaluationSet, objectiveWeights);
+        const incumbentEval = incumbentGenome
+          ? evaluateGenome(incumbentGenome, evaluationSet, objectiveWeights)
+          : null;
+        const policyDiff = summarizePolicyDiff(incumbentGenome, run.champion);
+        if (incumbentGenome) state.previousChampion = incumbentGenome;
+        state.champion = run.champion;
+        state.baselineEvaluation = candidateEval;
+
+        const completedAt = Date.now();
+        const runSummary = {
+          runId,
+          source: "manual",
+          startedAt,
+          completedAt,
+          durationMs: completedAt - startedAt,
+          trainSize: state.trajectories.length,
+          holdoutSize: 0,
+          promoted: true,
+          reason: "manual_force_run",
+          championId: run.champion.id,
+          candidateAggregate: roundMetric(candidateEval.aggregateScore),
+          incumbentAggregate: roundMetric(incumbentEval?.aggregateScore),
           gate: {
             promote: true,
             reason: "manual_force_run"
           },
-          promoted: true,
           policyDiff
-        }
-      };
-      state.lastEvolutionAt = completedAt;
-      state.lastEvolutionTrajectoryCount = state.trajectories.length;
-      return state.lastRun;
+        };
+        recordRun(runSummary);
+        recordEvent({
+          type: "promotion",
+          source: "manual",
+          runId,
+          reason: "manual_force_run",
+          policyId: run.champion.id,
+          candidateEval,
+          incumbentEval,
+          policyDiff
+        });
+        recordEvent({
+          type: "evolution_complete",
+          source: "manual",
+          runId,
+          promoted: true,
+          reason: "manual_force_run",
+          policyId: run.champion.id,
+          durationMs: runSummary.durationMs
+        });
+
+        state.lastRun = {
+          ...run,
+          runId,
+          source: "manual",
+          startedAt,
+          completedAt,
+          durationMs: runSummary.durationMs,
+          online: {
+            trainSetSize: state.trajectories.length,
+            holdoutSetSize: 0,
+            validationSetSize: state.trajectories.length,
+            candidateEval,
+            incumbentEval,
+            gate: {
+              promote: true,
+              reason: "manual_force_run"
+            },
+            promoted: true,
+            policyDiff
+          }
+        };
+        state.lastEvolutionAt = completedAt;
+        state.lastEvolutionTrajectoryCount = state.trajectories.length;
+        return state.lastRun;
       })();
 
       state.manualEvolutionInFlight = manualRunPromise;
@@ -850,6 +861,9 @@ export function createOpenClawEvolutionService({
         }
         if (state.evolutionInFlight === manualRunPromise) {
           state.evolutionInFlight = null;
+        }
+        if (state.activeManualRun?.runId === runId) {
+          state.activeManualRun = null;
         }
       }
     },

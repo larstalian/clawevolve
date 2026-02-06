@@ -309,8 +309,8 @@ function safeRegisterGateway(api, service) {
     "claw_evolve_force_run",
     wrapGatewayHandler(async (params = {}) => {
       const run = await service.evolve({
-        generations: Number(params.generations || 6),
-        populationSize: Number(params.populationSize || 18)
+        generations: Number(params.generations || 3),
+        populationSize: Number(params.populationSize || 8)
       });
       return {
         runId: run.runId || null,

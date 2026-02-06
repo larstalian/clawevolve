@@ -42,6 +42,22 @@ def metric_or_neutral(raw_value: Any, normalizer) -> float:
     return normalizer(value)
 
 
+def extract_first_json_object(raw: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, str):
+        return None
+    decoder = json.JSONDecoder()
+    for index, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(raw[index:])
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def normalize_tool_preferences(weights: Dict[str, float]) -> Dict[str, float]:
     safe_weights = {k: max(0.0, float(v)) for k, v in weights.items()}
     total = sum(safe_weights.values())
@@ -96,8 +112,8 @@ def genome_from_policy(seed_genome: Dict[str, Any], policy: Dict[str, Any]) -> D
 class EvolveRequest(BaseModel):
     seedGenome: Dict[str, Any]
     trajectories: List[Dict[str, Any]]
-    generations: int = Field(default=6, ge=1, le=200)
-    populationSize: int = Field(default=18, ge=4, le=500)
+    generations: int = Field(default=3, ge=1, le=200)
+    populationSize: int = Field(default=8, ge=4, le=500)
     objectiveWeights: Optional[Dict[str, float]] = None
     algorithm: Optional[Dict[str, Any]] = None
     gepa: Optional[Dict[str, Any]] = None
@@ -108,12 +124,13 @@ class OpenClawTelemetryAdapter:
         self,
         seed_policy: Dict[str, Any],
         objective_weights: Dict[str, float],
+        reflection_lm: Any = None,
     ) -> None:
         self.seed_policy = seed_policy
         self.objective_weights = objective_weights
+        self.reflection_lm = reflection_lm
         # Optional GEPA adapter hooks used by reflective mutation.
-        # We intentionally leave them unset (None) to use GEPA defaults.
-        self.propose_new_texts = None
+        self.propose_new_texts = self._propose_new_texts if reflection_lm is not None else None
         self.select_predictors_to_update = None
 
     def _parse_policy(self, candidate: Dict[str, str]) -> tuple[Dict[str, Any], Optional[str]]:
@@ -128,7 +145,10 @@ class OpenClawTelemetryAdapter:
             return policy, f"invalid policy_json: {exc}"
 
         if isinstance(parsed.get("systemPrompt"), str):
-            policy["systemPrompt"] = parsed["systemPrompt"]
+            next_prompt = parsed["systemPrompt"].strip()
+            if len(next_prompt) > 1200:
+                next_prompt = next_prompt[:1200]
+            policy["systemPrompt"] = next_prompt
         if parsed.get("responseStyle") in {"concise", "balanced", "detailed"}:
             policy["responseStyle"] = parsed["responseStyle"]
 
@@ -188,6 +208,49 @@ class OpenClawTelemetryAdapter:
         raw = mean(scores)
         return clamp((raw + 1.0) / 2.0, 0.0, 1.0)
 
+    def _prompt_bonus_for_trajectory(
+        self, trajectory: Dict[str, Any], policy: Dict[str, Any]
+    ) -> float:
+        prompt_text = str(policy.get("systemPrompt", "")).lower()
+        bonus = 0.0
+
+        if not prompt_text:
+            return -0.02
+
+        prompt_len = len(prompt_text)
+        if prompt_len > 900:
+            bonus -= 0.05
+        elif prompt_len > 500:
+            bonus -= 0.03
+        elif prompt_len < 80:
+            bonus -= 0.01
+        else:
+            bonus += 0.01
+
+        latency_ms = trajectory.get("latencyMs")
+        if isinstance(latency_ms, (int, float)) and latency_ms > 2500:
+            if "concise" in prompt_text or "efficient" in prompt_text or "direct" in prompt_text:
+                bonus += 0.02
+
+        safety_incidents = float(trajectory.get("safetyIncidents", 0.0) or 0.0)
+        if safety_incidents > 0:
+            if "safe" in prompt_text or "safety" in prompt_text or "risk" in prompt_text:
+                bonus += 0.02
+            else:
+                bonus -= 0.03
+        else:
+            if "safe" in prompt_text or "safety" in prompt_text:
+                bonus += 0.01
+
+        calls = trajectory.get("toolCalls") or []
+        if calls:
+            if "tool" in prompt_text:
+                bonus += 0.01
+            else:
+                bonus -= 0.01
+
+        return clamp(bonus, -0.06, 0.06)
+
     def _evaluate_example(
         self, trajectory: Dict[str, Any], policy: Dict[str, Any]
     ) -> tuple[float, Dict[str, float], Dict[str, Any], str]:
@@ -210,6 +273,7 @@ class OpenClawTelemetryAdapter:
             if policy["responseStyle"] == "balanced"
             else (0.95 if policy["responseStyle"] == "concise" else 0.9)
         )
+        prompt_bonus = self._prompt_bonus_for_trajectory(trajectory, policy)
 
         total = (
             self.objective_weights["success"] * success_rate
@@ -218,6 +282,7 @@ class OpenClawTelemetryAdapter:
             + self.objective_weights["toolReliability"] * tool_reliability
             + self.objective_weights["efficiency"] * efficiency
             + style_bonus
+            + prompt_bonus
             - strategy_penalty
         )
         total = clamp(total, 0.0, 1.0)
@@ -240,7 +305,7 @@ class OpenClawTelemetryAdapter:
             failure_hint = "Preserve this behavior while improving efficiency."
         feedback = (
             f"success={success_rate:.2f}, safety={safety:.2f}, "
-            f"toolReliability={tool_reliability:.2f}. {failure_hint}"
+            f"toolReliability={tool_reliability:.2f}, promptBonus={prompt_bonus:.3f}. {failure_hint}"
         )
         return total, objectives, output, feedback
 
@@ -309,6 +374,109 @@ class OpenClawTelemetryAdapter:
             )
 
         return {component: rows for component in components_to_update}
+
+    def _summarize_reflective_rows(
+        self, rows: List[Dict[str, Any]]
+    ) -> tuple[Dict[str, float], List[str]]:
+        objective_keys = [
+            "successRate",
+            "satisfaction",
+            "safety",
+            "toolReliability",
+            "efficiency",
+        ]
+        objective_values: Dict[str, List[float]] = {key: [] for key in objective_keys}
+        feedback_samples: List[str] = []
+
+        for row in rows[:50]:
+            generated = row.get("Generated Outputs", {})
+            objectives = generated.get("objectives", {}) if isinstance(generated, dict) else {}
+            if isinstance(objectives, dict):
+                for key in objective_keys:
+                    try:
+                        value = float(objectives.get(key))
+                    except Exception:
+                        continue
+                    if 0.0 <= value <= 1.0:
+                        objective_values[key].append(value)
+
+            feedback = row.get("Feedback")
+            if isinstance(feedback, str):
+                compact = " ".join(feedback.split())
+                if compact and compact not in feedback_samples:
+                    feedback_samples.append(compact[:220])
+                    if len(feedback_samples) >= 4:
+                        break
+
+        objective_means = {
+            key: round(mean(values), 6) if values else 0.5 for key, values in objective_values.items()
+        }
+        return objective_means, feedback_samples
+
+    def _propose_new_texts(
+        self,
+        candidate: Dict[str, str],
+        reflective_dataset: Dict[str, List[Dict[str, Any]]],
+        components_to_update: List[str],
+    ) -> Dict[str, str]:
+        if "policy_json" not in components_to_update:
+            return {}
+        if self.reflection_lm is None:
+            return {}
+
+        current_policy, _ = self._parse_policy(candidate)
+        rows = reflective_dataset.get("policy_json") or []
+        objective_means, feedback_samples = self._summarize_reflective_rows(rows)
+
+        prompt = (
+            "You are optimizing a policy JSON for an assistant.\n"
+            "Return ONLY one JSON object and nothing else.\n"
+            "Allowed top-level keys: systemPrompt, responseStyle, toolPreferences, toolRetryBudget, "
+            "deliberationBudget, memoryDepth, safeguards.\n"
+            "Constraints:\n"
+            "- responseStyle must be one of: concise, balanced, detailed.\n"
+            "- toolRetryBudget integer in [0, 8].\n"
+            "- deliberationBudget integer in [1, 12].\n"
+            "- memoryDepth integer in [1, 64].\n"
+            "- safeguards.maxRiskScore float in [0.05, 0.95].\n"
+            "- safeguards.disallowedTools must be a list of strings.\n"
+            "- Keep policy compact and stable; make only small changes.\n\n"
+            f"Current policy JSON:\n{json.dumps(current_policy, separators=(',', ':'), sort_keys=True)}\n\n"
+            f"Recent objective means:\n{json.dumps(objective_means, separators=(',', ':'), sort_keys=True)}\n"
+            f"Recent feedback samples:\n{json.dumps(feedback_samples, separators=(',', ':'))}\n\n"
+            "Return strict JSON only."
+        )
+
+        raw = coerce_lm_output_to_text(self.reflection_lm(prompt)).strip()
+        parsed = extract_first_json_object(raw)
+        if not isinstance(parsed, dict):
+            return {}
+
+        parsed_candidate = {
+            "policy_json": json.dumps(parsed, separators=(",", ":"), sort_keys=True)
+        }
+        next_policy, parse_error = self._parse_policy(parsed_candidate)
+        if parse_error:
+            return {}
+
+        # Keep non-prompt structure stable so evolution focuses on prompt/style personalization.
+        next_policy["toolRetryBudget"] = current_policy["toolRetryBudget"]
+        next_policy["deliberationBudget"] = current_policy["deliberationBudget"]
+        next_policy["memoryDepth"] = current_policy["memoryDepth"]
+        next_policy["toolPreferences"] = copy.deepcopy(current_policy["toolPreferences"])
+        next_policy["safeguards"] = copy.deepcopy(current_policy["safeguards"])
+
+        # Optional deterministic nudge when efficiency is weak and LM did not change style.
+        if objective_means.get("efficiency", 0.5) < 0.67 and next_policy["responseStyle"] == current_policy["responseStyle"]:
+            next_policy["responseStyle"] = "concise"
+            prompt_text = next_policy.get("systemPrompt", "")
+            if "concise" not in prompt_text.lower():
+                next_policy["systemPrompt"] = f"{prompt_text}\nKeep responses concise and direct.".strip()
+
+        if next_policy == current_policy:
+            return {}
+
+        return {"policy_json": json.dumps(next_policy, separators=(",", ":"), sort_keys=True)}
 
 
 def extract_history(result: Any) -> List[Dict[str, Any]]:
@@ -530,7 +698,6 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
 
     seed_policy = seed_policy_from_genome(request.seedGenome)
     objective_weights = objective_defaults(request.objectiveWeights)
-    adapter = OpenClawTelemetryAdapter(seed_policy, objective_weights)
 
     algorithm_cfg = request.algorithm or {}
     outer_holdout_applied = bool(algorithm_cfg.get("outerHoldoutApplied", False))
@@ -557,6 +724,7 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
         reflection_lm = build_reflection_lm(reflection_model)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to initialize reflection LM: {exc}") from exc
+    adapter = OpenClawTelemetryAdapter(seed_policy, objective_weights, reflection_lm=reflection_lm)
 
     strategy = (
         gepa_cfg.get("candidateSelectionStrategy")
@@ -566,16 +734,22 @@ def evolve(request: EvolveRequest, authorization: Optional[str] = Header(default
     reflection_minibatch_size = int(
         gepa_cfg.get("reflectionMinibatchSize")
         or algorithm_cfg.get("reflectionMinibatchSize")
-        or 3
+        or 2
     )
     use_merge = bool(
         gepa_cfg.get("useMerge")
         if "useMerge" in gepa_cfg
-        else algorithm_cfg.get("useMerge", True)
+        else algorithm_cfg.get("useMerge", False)
     )
     max_metric_calls = gepa_cfg.get("maxMetricCalls")
     if max_metric_calls is None:
-        max_metric_calls = max(40, request.generations * request.populationSize * 2)
+        # Budget by expected evaluation work so runs stay fast but still perform
+        # several actual refinement steps on realistic valset sizes.
+        baseline_eval_calls = max(1, len(valset))
+        per_iteration_calls = max(2, reflection_minibatch_size * 2)
+        target_iterations = max(3, int(request.generations))
+        estimated_calls = baseline_eval_calls + per_iteration_calls * target_iterations
+        max_metric_calls = max(32, min(96, estimated_calls))
 
     max_merge_invocations = int(gepa_cfg.get("maxMergeInvocations", 5))
     seed_value = int(gepa_cfg.get("seed", 0))

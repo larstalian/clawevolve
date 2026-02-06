@@ -15,10 +15,10 @@ function normalizePythonGepaConfig(engineConfig = {}) {
   return {
     reflectionLm: gepa.reflectionLm || "openai/gpt-5-mini",
     candidateSelectionStrategy: gepa.candidateSelectionStrategy || "pareto",
-    reflectionMinibatchSize: gepa.reflectionMinibatchSize ?? 3,
-    useMerge: gepa.useMerge ?? true,
+    reflectionMinibatchSize: gepa.reflectionMinibatchSize ?? 2,
+    useMerge: gepa.useMerge ?? false,
     maxMergeInvocations: gepa.maxMergeInvocations ?? 5,
-    maxMetricCalls: gepa.maxMetricCalls,
+    maxMetricCalls: gepa.maxMetricCalls ?? 40,
     seed: gepa.seed ?? 0
   };
 }
